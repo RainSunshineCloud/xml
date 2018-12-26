@@ -10,5 +10,16 @@
 
 ## 支持文件读取和字符串读取
 
-## 注意，转化为xml时必须为utf-8
+## 注意： 
+1. 转化为xml时必须为utf-8
+2. false 转为0, true转为1 null不输出
+3. number类型不加CDATA,string类型加CDATA
+## 用法
+
+```
+    $json = ["from"=>2,"to"=>true,"message"=>["sdf" => "1sdf"]];
+    $str = Xml::encode($json,'xml'); //转为xml格式,不带声明
+    $str = Xml::encode($json,'xml',true); //转为xml格式,带声明
+    $array = Xml::toArray($str);//转为Array格式
+```
 

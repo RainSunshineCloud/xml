@@ -1,12 +1,14 @@
 <?php
 namespace RainSunshineCloud;
 
+use \DOMDocument;
+use \DOMNode;
+
 class Xml
 {
 	protected static $xml_file = "php://input";
 	protected static $format = 'UTF-8';
 	protected static $xml = null;
-	public static $encodeParser = 'encodeWechat';
 
 	/**
 	 * xml转为对象
@@ -16,16 +18,30 @@ class Xml
 	 */
 	public static function toObj(string $string = null,$class_name = 'SimpleXMLElement')
 	{
+		libxml_use_internal_errors(true);
+
 		if ($string === null) {
 			$string = file_get_contents($xml_file);
 		}
 
-
 		if (self::$format !== 'UTF-8') {
 			$string = mb_convert_encoding($string, 'UTF-8',$xml_file);
 		}
+		
+		libxml_disable_entity_loader(true);
+		$res = simplexml_load_string($string,$class_name,LIBXML_NOCDATA);
 
-		return simplexml_load_string($string,$class_name,LIBXML_NOCDATA);
+		if ($res == false) {
+			if (isset(libxml_get_errors()[0])) {
+				$message = libxml_get_errors()[0]->message;
+			} else {
+				$message = "转化失败";
+			}
+			
+			throw new XmlException($message,3);
+		}
+
+		return $res;
 	}
 
 	/**
@@ -53,42 +69,25 @@ class Xml
 	 * @param  [type]
 	 * @return [type]
 	 */
-	public static function encode($entry,$value = null)
+	public static function encode($entry,string $root,$declaration = false)
 	{
 		if (is_array($entry)) {
-			return self::encodeArray($entry);
+			$res = self::encodeArray($entry,$root);
 		} else if (is_object($entry)) {
-			return self::encodeObj($entry);
+			$res = self::encodeObj($entry,$root);
 		} else if (is_string($entry) && json_decode($entry)) {
-			return self::encodeJson($entry);
-		} else if (is_string($entry) && $value != null) {
-			return self::encodeString($entry,$value);
+			$res = self::encodeJson($entry,$root);
+		} else if (is_string($entry)) {
+			$res = self::encodeString($entry,$root);
 		} else {
 			throw new XmlException('不支持该类型转化',1);
 		}
-	}
 
-	/**
-	 * 微信xml
-	 * @param  string
-	 * @return [type]
-	 */
-	protected static function encodeWechat(array $arr)
-	{
-		$arr = ['xml' => $arr];
-		$str = self::encodeDefault($arr);
-		return str_replace('<?xml version="1.0" encoding="UTF-8"?>','',$str);
-	}
+		if ($declaration) {
+			return $res;
+		}
 
-	/**
-	 * 数组变为xml
-	 * @param  array
-	 * @return [type]
-	 */
-	public static function encodeArray(array $arr)
-	{
-		$parse = self::$encodeParser;
-		return self::{$parse}($arr);
+		return trim(str_replace('<?xml version="1.0" encoding="UTF-8"?>', "", $res),"\n");
 	}
 
 	/**
@@ -96,16 +95,12 @@ class Xml
 	 * @param  array
 	 * @return [type]
 	 */
-	public static function encodeDefault(array $arr)
+	public static function encodeArray(array $arr,string $root)
 	{
 		self::$xml = new DOMDocument('1.0', 'UTF-8');
-
-		if (isset($arr['cdata'])) {
-			throw new XmlException('xml根元素不能是cdata',2);
-			return false;
-		}
-		self::appendElements($arr,self::$xml);
-		$str = self::$xml->saveXML();
+		$all = [$root=>$arr];
+		self::appendElements($all,self::$xml);
+		$str = self::$xml->saveXML(null,LIBXML_NOEMPTYTAG);
 		self::$xml = null;
 		return $str;
 	}
@@ -120,23 +115,33 @@ class Xml
 	protected static function appendElements(array $arr,DOMNode $element_nodes_obj)
 	{
 		foreach ($arr as $node => $child) {
-			if ($node == 'cdata') {
-				if (!is_string($child)) {
-					$child = json_encode($child);
-				} 
-				$cdata_obj = self::$xml->createCDATASection($child);
-				$element_nodes_obj->appendChild($cdata_obj);
-			}else if (is_array($child)) {
+			if (is_array($child)) {
 				$new_nodes_obj = self::$xml->createElement($node);
 				self::appendElements($child,$new_nodes_obj);
 				$element_nodes_obj->appendChild($new_nodes_obj);
 				//删除引用，以便回收
 				$new_nodes_obj = null;
-			} else {
+			} else if (is_numeric($child)|| is_bool($child) || is_null($child)) {
+				if (is_bool($child)) { //处理布尔值问题
+					$child = $child ? 1 : 0;
+				}
+				if (is_null($child)) {
+					continue;
+				}
+				
 				$element = self::$xml->createElement($node,$child);
 				$element_nodes_obj->appendChild($element);
 				//删除引用以便回收
 				$element = null;
+			} else if (is_string($child)) {
+				$cdata_obj = self::$xml->createCDATASection($child);
+				$element = self::$xml->createElement($node);
+				$element->appendChild($cdata_obj);
+				$element_nodes_obj->appendChild($element);
+				//删除引用以便回收
+				$element = null;
+			} else {
+				throw new XmlException('数据源格式错误，内部不能包含对象',4);
 			}
 		}
 
@@ -149,9 +154,9 @@ class Xml
 	 * @param  object
 	 * @return [type]
 	 */
-	protected static function encodeObj(object $obj)
+	protected static function encodeObj(object $obj,$root)
 	{
-		return self::encodeArray(self::objectToArray($obj));
+		return self::encodeArray(self::objectToArray($obj),$root);
 	}
 
 	/**
@@ -159,9 +164,12 @@ class Xml
 	 * @param  string
 	 * @return [type]
 	 */
-	protected static function encodeJson(string $string)
+	protected static function encodeJson(string $string,string $root)
 	{
-		return self::encodeArray(json_decode($string,true));
+		if (!$array = json_decode($string,true)) {
+			throw new XmlException('json转数组失败',6);
+		}
+		return self::encodeArray($array,$root);
 	}
 
 	/**
@@ -170,9 +178,9 @@ class Xml
 	 * @param  [type]
 	 * @return [type]
 	 */
-	protected static function encodeString(string $key, $value)
+	protected static function encodeString(string $key, string $root)
 	{
-		return self::encodeArray([$key,$value]);
+		return self::encodeArray($key,$root);
 	}
 
 	/**
@@ -182,7 +190,15 @@ class Xml
 	 */
 	protected static function objectToArray(object $obj)
 	{
-		return json_decode(json_encode($obj),true);
+		if (!$str = json_encode($obj)) {
+			throw new XmlException('对象转为数组失败',5);
+		}
+
+		if (!$array = json_decode($str,true)) {
+			throw new XmlException('对象转为数组失败',5);
+		}
+
+		return $array;
 	}
 
 	/**
